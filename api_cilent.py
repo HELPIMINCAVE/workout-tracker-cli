@@ -1,7 +1,6 @@
 import httpx
 from config import BASE_URL, load_token, save_token
 
-
 class APIClient:
     def __init__(self, base_url: str = BASE_URL):
         self.base_url = base_url
