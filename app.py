@@ -3,6 +3,21 @@ import pandas as pd
 from api_client import APIClient
 from ai_service import AIService
 from config import load_token, clear_token
+import httpx, time
+
+
+def ensure_backend_is_awake(api_url: str):
+    health_url = f"{api_url}/"
+    
+    with st.spinner("⏳ Waking up database servers... (This takes about 30 seconds on first load)"):
+        for _ in range(30):
+            try:
+                response = httpx.get(health_url, timeout=2.0)
+                if response.status_code == 200:
+                    return True
+            except httpx.RequestError:
+                time.sleep(2)
+        return False
 
 # Page setup
 st.set_page_config(
@@ -16,6 +31,7 @@ api = APIClient()
 
 token = load_token()
 is_logged_in = token is not None
+ensure_backend_is_awake(api.base_url)
 
 with st.sidebar:
     st.title("🏋️ Workout Tracker AI")
