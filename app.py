@@ -5,6 +5,10 @@ from ai_service import AIService
 from config import load_token, clear_token
 import httpx, time
 
+query_params = st.query_params
+if "ping" in query_params:
+    st.write("OK")
+    st.stop()
 
 def ensure_backend_is_awake(api_url: str):
     health_url = f"{api_url}/"
