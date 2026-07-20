@@ -1,27 +1,34 @@
 import streamlit as st
 import pandas as pd
-from api_client import APIClient
 from ai_service import AIService
-from config import load_token, clear_token
-import httpx, time
+import httpx, time, os, psycopg2
+from psycopg2.extras import RealDictCursor
+from werkzeug.security import generate_password_hash, check_password_hash
 
+# 1. Handle cron-job.org light ping rule
 query_params = st.query_params
 if "ping" in query_params:
     st.write("OK")
     st.stop()
 
-def ensure_backend_is_awake(api_url: str):
-    health_url = f"{api_url}/"
-    
-    with st.spinner("⏳ Waking up database servers... (This takes about 30 seconds on first load)"):
-        for _ in range(30):
-            try:
-                response = httpx.get(health_url, timeout=2.0)
-                if response.status_code == 200:
-                    return True
-            except httpx.RequestError:
-                time.sleep(2)
-        return False
+
+# 2. Database Connection Helper
+def get_db_connection():
+    db_url = os.environ.get("DATABASE_URL")
+    if not db_url:
+        st.error("DATABASE_URL environment variable is missing on Render!")
+        st.stop()
+    # pool_pre_ping equivalent for raw psycopg2 to survive Neon's 4 AM sleep cycles
+    retries = 3
+    for attempt in range(retries):
+        try:
+            # Using RealDictCursor lets us fetch rows as dictionaries, matching your old API client shape!
+            return psycopg2.connect(db_url, cursor_factory=RealDictCursor)
+        except Exception as e:
+            if attempt == retries - 1:
+                raise e
+            time.sleep(3)
+
 
 # Page setup
 st.set_page_config(
@@ -31,12 +38,15 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-api = APIClient()
+# Initialize Session State tracking
+if "logged_in" not in st.session_state:
+    st.session_state["logged_in"] = False
+if "user_id" not in st.session_state:
+    st.session_state["user_id"] = None
 
-token = load_token()
-is_logged_in = token is not None
-ensure_backend_is_awake(api.base_url)
+is_logged_in = st.session_state["logged_in"]
 
+# Sidebar authentication layout
 with st.sidebar:
     st.title("🏋️ Workout Tracker AI")
     st.write("Log workouts naturally & get smart coaching.")
@@ -49,31 +59,60 @@ with st.sidebar:
             email = st.text_input("Email", key="login_email")
             password = st.text_input("Password", type="password", key="login_pass")
             if st.button("Login", use_container_width=True):
-                if api.login(email, password):
-                    st.success("Logged in successfully!")
-                    st.rerun()
-                else:
-                    st.error("Invalid credentials.")
+                try:
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT id, password FROM users WHERE email = %s;", (email,))
+                    user = cursor.fetchone()
+                    cursor.close()
+                    conn.close()
+                    
+                    if user and check_password_hash(user["password"], password):
+                        st.session_state["logged_in"] = True
+                        st.session_state["user_id"] = user["id"]
+                        st.success("Logged in successfully!")
+                        st.rerun()
+                    else:
+                        st.error("Invalid credentials.")
+                except Exception as e:
+                    st.error(f"Login error: {e}")
         
         with tab_register:
             reg_email = st.text_input("Email", key="reg_email")
             reg_password = st.text_input("Password", type="password", key="reg_pass")
             if st.button("Register Account", use_container_width=True):
-                try:
-                    api.register(reg_email, reg_password)
-                    st.success("Account registered! Please log in.")
-                except Exception as e:
-                    st.error(f"Registration failed: {e}")
+                if not reg_email or not reg_password:
+                    st.warning("Please fill out both fields.")
+                else:
+                    try:
+                        conn = get_db_connection()
+                        cursor = conn.cursor()
+                        hashed_password = generate_password_hash(reg_password)
+                        
+                        cursor.execute(
+                            "INSERT INTO users (email, password) VALUES (%s, %s);",
+                            (reg_email, hashed_password)
+                        )
+                        conn.commit()
+                        cursor.close()
+                        conn.close()
+                        st.success("Account registered! Please log in inside the Login tab.")
+                    except psycopg2.errors.UniqueViolation:
+                        st.error("An account with this email already exists.")
+                    except Exception as e:
+                        st.error(f"Registration failed: {e}")
     else:
         st.success("Authorized Session Active")
         if st.button("Logout", use_container_width=True):
-            clear_token()
+            st.session_state["logged_in"] = False
+            st.session_state["user_id"] = None
             st.rerun()
 
+# Dashboard View logic
 if not is_logged_in:
     st.info("👋 Please log in or register via the sidebar to access your workout portal.")
 else:
-    # Set up dashboard tabs
+    current_user_id = st.session_state["user_id"]
     tab_log, tab_history, tab_coach = st.tabs([
         "📝 Log Workout (AI)",
         "📅 Workout History",
@@ -96,9 +135,15 @@ else:
             else:
                 with st.spinner("Analyzing log with Gemini..."):
                     try:
-                        available_exercises = api.get_exercises()
+                        # Fetch references directly from DB
+                        conn = get_db_connection()
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT id, name, category FROM exercises;")
+                        available_exercises = cursor.fetchall()  # Returns list of dicts via RealDictCursor
+                        
                         if not available_exercises:
-                            st.error("Could not fetch database exercise references.")
+                            st.error(
+                                "Could not fetch database exercise references. Ensure your exercises table is seeded.")
                             st.stop()
                         
                         ai = AIService()
@@ -108,24 +153,29 @@ else:
                         sets = parsed.get("sets", [])
                         
                         if not sets:
-                            st.warning(
-                                "Gemini couldn't identify any matching exercises/sets. Double-check your database list.")
+                            st.warning("Gemini couldn't identify any matching exercises/sets.")
                         else:
-                            created_workout = api.create_workout(name=workout_name)
-                            workout_id = created_workout["id"]
+                            # Save workout transactionally
+                            cursor.execute(
+                                "INSERT INTO workouts (user_id, name) VALUES (%s, %s) RETURNING id;",
+                                (current_user_id, workout_name)
+                            )
+                            workout_id = cursor.fetchone()["id"]
                             
                             for s in sets:
-                                api.add_set(
-                                    workout_id=workout_id,
-                                    exercise_id=s["exercise_id"],
-                                    reps=s["reps"],
-                                    weight=s["weight"],
-                                    set_order=s["set_order"]
+                                cursor.execute(
+                                    """INSERT INTO sets (workout_id, exercise_id, reps, weight, set_order)
+                                       VALUES (%s, %s, %s, %s, %s);""",
+                                    (workout_id, s["exercise_id"], s["reps"], s["weight"], s["set_order"])
                                 )
                             
+                            conn.commit()
                             st.balloons()
                             st.success(
                                 f"Successfully saved **'{workout_name}'** (ID #{workout_id}) with {len(sets)} sets!")
+                        
+                        cursor.close()
+                        conn.close()
                     except Exception as e:
                         st.error(f"Failed to log workout: {e}")
     
@@ -135,9 +185,17 @@ else:
         with col_hist:
             st.subheader("Your Workout Logs")
             try:
-                workouts = api.get_workouts()
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT id, name, created_at FROM workouts WHERE user_id = %s ORDER BY created_at DESC;",
+                    (current_user_id,)
+                )
+                workouts = cursor.fetchall()
+                cursor.close()
+                conn.close()
+                
                 if workouts:
-                    # Parse dates nicely into a clean table
                     df_workouts = pd.DataFrame(workouts)
                     df_display = df_workouts[["id", "name", "created_at"]].copy()
                     df_display.columns = ["Workout ID", "Workout Name", "Logged Date"]
@@ -150,7 +208,13 @@ else:
         with col_ex:
             st.subheader("Available Database Exercises")
             try:
-                exercise_list = api.get_exercises()
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute("SELECT id, name, category FROM exercises ORDER BY name ASC;")
+                exercise_list = cursor.fetchall()
+                cursor.close()
+                conn.close()
+                
                 if exercise_list:
                     df_ex = pd.DataFrame(exercise_list)
                     df_ex_display = df_ex[["id", "name", "category"]].copy()
@@ -163,13 +227,18 @@ else:
     
     with tab_coach:
         st.header("🧠 AI Fitness Coach Insights")
-        st.write(
-            "Let Gemini evaluate your progression targets, weekly volume, and provide your next actionable progressive overload goals.")
+        st.write("Let Gemini evaluate your progression targets and provide progressive overload goals.")
         
         if st.button("Generate Training Analysis", type="primary"):
             with st.spinner("Analyzing historical patterns..."):
                 try:
-                    history_data = api.get_workouts()
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT id, name, created_at FROM workouts WHERE user_id = %s;", (current_user_id,))
+                    history_data = cursor.fetchall()
+                    cursor.close()
+                    conn.close()
+                    
                     if not history_data:
                         st.info("Log a few workouts first to unlock progressive coaching!")
                     else:
