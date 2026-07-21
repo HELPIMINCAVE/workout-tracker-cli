@@ -5,24 +5,19 @@ import httpx, time, os, psycopg2
 from psycopg2.extras import RealDictCursor
 from werkzeug.security import generate_password_hash, check_password_hash
 
-# 1. Handle cron-job.org light ping rule
 query_params = st.query_params
 if "ping" in query_params:
     st.write("OK")
     st.stop()
 
-
-# 2. Database Connection Helper
 def get_db_connection():
     db_url = os.environ.get("DATABASE_URL")
     if not db_url:
         st.error("DATABASE_URL environment variable is missing on Render!")
         st.stop()
-    # pool_pre_ping equivalent for raw psycopg2 to survive Neon's 4 AM sleep cycles
     retries = 3
     for attempt in range(retries):
         try:
-            # Using RealDictCursor lets us fetch rows as dictionaries, matching your old API client shape!
             return psycopg2.connect(db_url, cursor_factory=RealDictCursor)
         except Exception as e:
             if attempt == retries - 1:
@@ -38,7 +33,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Initialize Session State tracking
 if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
 if "user_id" not in st.session_state:
@@ -46,7 +40,6 @@ if "user_id" not in st.session_state:
 
 is_logged_in = st.session_state["logged_in"]
 
-# Sidebar authentication layout
 with st.sidebar:
     st.title("🏋️ Workout Tracker AI")
     st.write("Log workouts naturally & get smart coaching.")
@@ -108,7 +101,6 @@ with st.sidebar:
             st.session_state["user_id"] = None
             st.rerun()
 
-# Dashboard View logic
 if not is_logged_in:
     st.info("👋 Please log in or register via the sidebar to access your workout portal.")
 else:
@@ -135,11 +127,10 @@ else:
             else:
                 with st.spinner("Analyzing log with Gemini..."):
                     try:
-                        # Fetch references directly from DB
                         conn = get_db_connection()
                         cursor = conn.cursor()
                         cursor.execute("SELECT id, name, category FROM exercises;")
-                        available_exercises = cursor.fetchall()  # Returns list of dicts via RealDictCursor
+                        available_exercises = cursor.fetchall()
                         
                         if not available_exercises:
                             st.error(
@@ -155,7 +146,6 @@ else:
                         if not sets:
                             st.warning("Gemini couldn't identify any matching exercises/sets.")
                         else:
-                            # Save workout transactionally
                             cursor.execute(
                                 "INSERT INTO workouts (user_id, name) VALUES (%s, %s) RETURNING id;",
                                 (current_user_id, workout_name)
@@ -242,8 +232,15 @@ else:
                     if not history_data:
                         st.info("Log a few workouts first to unlock progressive coaching!")
                     else:
+                        formatted_history = []
+                        for row in history_data:
+                            row_dict = dict(row)
+                            if "created_at" in row_dict and row_dict["created_at"]:
+                                row_dict["created_at"] = str(row_dict["created_at"])
+                            formatted_history.append(row_dict)
+                        
                         ai = AIService()
-                        coaching_markdown = ai.get_coaching_advice(history_data)
+                        coaching_markdown = ai.get_coaching_advice(formatted_history)
                         st.markdown(coaching_markdown)
                 except Exception as e:
                     st.error(f"Could not retrieve advice: {e}")
