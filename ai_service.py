@@ -6,8 +6,8 @@ from google.genai import types
 class AIService:
     def __init__(self):
         self.client = genai.Client()
-        self.model = "gemini-1.5-flash"
-
+        self.model = "gemini-2.0-flash"
+    
     def parse_workout_text(self, raw_notes: str, available_exercises: list) -> dict:
         prompt = f"""
         You are a workout parser assistant.
