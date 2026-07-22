@@ -18,6 +18,7 @@ class AIService:
         
         self.api_key: str = key
         self.client = genai.Client(api_key=self.api_key)
+        self.model = "gemini-3.5-flash"
 
     def parse_workout_text(self, raw_input: str, exercise_list: list) -> dict:
         exercises_str = "\n".join(
@@ -52,7 +53,7 @@ class AIService:
         """
 
         response = self.client.models.generate_content(
-            model="gemini-3.5-flash",
+            model=self.model,
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json"
