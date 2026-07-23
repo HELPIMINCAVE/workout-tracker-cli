@@ -1,25 +1,24 @@
 import json
 import os
-from google import genai
-from google.genai import types
+from groq import Groq
 
 class AIService:
     def __init__(self):
-        self.client = genai.Client()
-        self.model = "gemini-2.0-flash"
-    
+        self.client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+        self.model = "llama-3.3-70b-versatile"
+
     def parse_workout_text(self, raw_notes: str, available_exercises: list) -> dict:
         prompt = f"""
         You are a workout parser assistant.
-        Analyze the user's workout log and map matched movements to the provided reference exercise IDs.
+        Analyze the user's workout log and map matched movements to the reference exercise IDs.
 
-        Reference Exercise Database:
+        Database Exercises:
         {json.dumps(available_exercises)}
 
         User Log:
         "{raw_notes}"
 
-        Return JSON in this format:
+        Return JSON in this exact format:
         {{
             "workout_name": "Short summary name (e.g., Push Day)",
             "sets": [
@@ -33,15 +32,16 @@ class AIService:
         }}
         """
 
-        response = self.client.models.generate_content(
+        response = self.client.chat.completions.create(
             model=self.model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json"
-            )
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": "You are a helpful workout parsing assistant that outputs strictly JSON."},
+                {"role": "user", "content": prompt}
+            ]
         )
 
-        return json.loads(response.text)
+        return json.loads(response.choices[0].message.content)
 
     def get_coaching_advice(self, history_data: list) -> str:
         prompt = f"""
@@ -52,9 +52,12 @@ class AIService:
         {json.dumps(history_data, default=str)}
         """
 
-        response = self.client.models.generate_content(
+        response = self.client.chat.completions.create(
             model=self.model,
-            contents=prompt
+            messages=[
+                {"role": "system", "content": "You are an expert strength coach giving concise, actionable advice."},
+                {"role": "user", "content": prompt}
+            ]
         )
 
-        return response.text
+        return response.choices[0].message.content
