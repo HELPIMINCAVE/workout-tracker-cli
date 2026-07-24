@@ -1,21 +1,44 @@
 import streamlit as st
 import pandas as pd
 from ai_service import AIService
-import time, os, random, string, secrets, psycopg2, resend, re
+import time, os, re, secrets, psycopg, resend, dns.resolver
 from datetime import datetime, timedelta
 from psycopg2.extras import RealDictCursor
 from werkzeug.security import generate_password_hash, check_password_hash
 
+# Initialize Resend API Key
 resend.api_key = os.environ.get("RESEND_API_KEY")
 
+
+# --- EMAIL VALIDATION HELPERS ---
+def is_valid_email_format(email: str) -> bool:
+    """Checks standard email syntax (user@domain.com)."""
+    pattern = r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$"
+    return re.match(pattern, email.strip()) is not None
+
+
+def domain_has_mx_records(email: str) -> bool:
+    """Checks if the email's domain actually has active mail servers configured."""
+    try:
+        domain = email.split('@')[1]
+        records = dns.resolver.resolve(domain, 'MX')
+        return len(records) > 0
+    except Exception:
+        return False
+
+
+# --- QUERY PARAMS & CONFIRMATION REDIRECTS ---
 query_params = st.query_params
 
 if "ping" in query_params:
     st.write("OK")
     st.stop()
 
-confirm_token = query_params.get("confirm_reset")
+confirm_reset_token = query_params.get("confirm_reset")
+verify_account_token = query_params.get("verify_account")
 
+
+# DB Connection Helper
 def get_db_connection():
     db_url = os.environ.get("DATABASE_URL")
     if not db_url:
@@ -30,10 +53,8 @@ def get_db_connection():
                 raise e
             time.sleep(2)
 
-def is_valid_email(email: str) -> bool:
-    pattern = r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$"
-    return re.match(pattern, email.strip()) is not None
 
+# Page Setup
 st.set_page_config(
     page_title="Workout Tracker AI",
     page_icon="🏋️",
@@ -41,7 +62,35 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-if confirm_token:
+# --- ACCOUNT VERIFICATION LINK ROUTE ---
+if verify_account_token:
+    st.title("✅ Account Verification")
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT pr.id, pr.user_id
+            FROM password_resets pr
+            WHERE pr.token = %s AND pr.expires_at > NOW()
+            ORDER BY pr.expires_at DESC LIMIT 1;
+        """, (verify_account_token,))
+        
+        req = cursor.fetchone()
+        if req:
+            cursor.execute("UPDATE users SET is_verified = TRUE WHERE id = %s;", (req["user_id"],))
+            cursor.execute("DELETE FROM password_resets WHERE user_id = %s;", (req["user_id"],))
+            conn.commit()
+            st.success("🎉 Your account has been verified! You can now log in.")
+        else:
+            st.error("Invalid or expired verification link.")
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        st.error(f"Verification error: {e}")
+    st.stop()
+
+# --- PASSWORD CHANGE LINK ROUTE ---
+if confirm_reset_token:
     st.title("🔒 Password Change Confirmation")
     try:
         conn = get_db_connection()
@@ -51,14 +100,14 @@ if confirm_token:
             FROM password_resets pr
             WHERE pr.token = %s AND pr.expires_at > NOW()
             ORDER BY pr.expires_at DESC LIMIT 1;
-        """, (confirm_token,))
+        """, (confirm_reset_token,))
         
         req = cursor.fetchone()
         if req and req["pending_password"]:
             cursor.execute("UPDATE users SET password = %s WHERE id = %s;", (req["pending_password"], req["user_id"]))
             cursor.execute("DELETE FROM password_resets WHERE user_id = %s;", (req["user_id"],))
             conn.commit()
-            st.success("🎉 Your password has been successfully updated! You can now log in with your new password.")
+            st.success("🎉 Your password has been updated! You can now log in with your new password.")
         else:
             st.error("Invalid or expired password reset link.")
         cursor.close()
@@ -67,6 +116,7 @@ if confirm_token:
         st.error(f"Error updating password: {e}")
     st.stop()
 
+# Session State
 if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
 if "user_id" not in st.session_state:
@@ -74,6 +124,7 @@ if "user_id" not in st.session_state:
 
 is_logged_in = st.session_state["logged_in"]
 
+# --- SIDEBAR AUTHENTICATION ---
 with st.sidebar:
     st.title("🏋️ Workout Tracker AI")
     st.write("Log workouts naturally & get smart coaching.")
@@ -82,6 +133,7 @@ with st.sidebar:
     if not is_logged_in:
         tab_login, tab_register, tab_reset = st.tabs(["Login", "Register", "Reset Password"])
         
+        # TAB 1: LOGIN
         with tab_login:
             email = st.text_input("Email", key="login_email")
             password = st.text_input("Password", type="password", key="login_pass")
@@ -89,29 +141,38 @@ with st.sidebar:
                 try:
                     conn = get_db_connection()
                     cursor = conn.cursor()
-                    cursor.execute("SELECT id, password FROM users WHERE email = %s;", (email,))
+                    cursor.execute("SELECT id, password, is_verified FROM users WHERE email = %s;",
+                                   (email.strip().lower(),))
                     user = cursor.fetchone()
                     cursor.close()
                     conn.close()
                     
                     if user and check_password_hash(user["password"], password):
-                        st.session_state["logged_in"] = True
-                        st.session_state["user_id"] = user["id"]
-                        st.success("Logged in successfully!")
-                        st.rerun()
+                        if not user.get("is_verified", True):
+                            st.error(
+                                "Please verify your email address via the link sent to your inbox before logging in.")
+                        else:
+                            st.session_state["logged_in"] = True
+                            st.session_state["user_id"] = user["id"]
+                            st.success("Logged in successfully!")
+                            st.rerun()
                     else:
                         st.error("Invalid credentials.")
                 except Exception as e:
                     st.error(f"Login error: {e}")
         
+        # TAB 2: REGISTER
         with tab_register:
             reg_email = st.text_input("Email", key="reg_email")
             reg_password = st.text_input("Password", type="password", key="reg_pass")
             if st.button("Register Account", use_container_width=True):
-                if not reg_email or not reg_password:
+                clean_email = reg_email.strip().lower()
+                if not clean_email or not reg_password:
                     st.warning("Please fill out both fields.")
-                elif not is_valid_email(reg_email):
-                    st.error("Please enter a valid email address (e.g., user@example.com).")
+                elif not is_valid_email_format(clean_email):
+                    st.error("Please enter a valid email address format (e.g., user@example.com).")
+                elif not domain_has_mx_records(clean_email):
+                    st.error("This email domain doesn't exist or cannot receive emails.")
                 elif len(reg_password) < 6:
                     st.warning("Password must be at least 6 characters long.")
                 else:
@@ -121,25 +182,54 @@ with st.sidebar:
                         hashed_password = generate_password_hash(reg_password)
                         
                         cursor.execute(
-                            "INSERT INTO users (email, password) VALUES (%s, %s);",
-                            (reg_email.strip().lower(), hashed_password)
+                            "INSERT INTO users (email, password, is_verified) VALUES (%s, %s, FALSE) RETURNING id;",
+                            (clean_email, hashed_password)
+                        )
+                        new_user_id = cursor.fetchone()["id"]
+                        
+                        # Generate Account Verification Link
+                        token = secrets.token_urlsafe(16)
+                        expires_at = datetime.now() + timedelta(hours=24)
+                        cursor.execute(
+                            "INSERT INTO password_resets (user_id, token, expires_at) VALUES (%s, %s, %s);",
+                            (new_user_id, token, expires_at)
                         )
                         conn.commit()
+                        
+                        app_url = "https://your-app-name.onrender.com"  # Replace with your actual Render service URL
+                        verify_link = f"{app_url}?verify_account={token}"
+                        
+                        try:
+                            resend.Emails.send({
+                                "from": "Workout AI <onboarding@resend.dev>",
+                                "to": [clean_email],
+                                "subject": "Verify Your Workout AI Account",
+                                "html": f"""
+                                <h3>Welcome to Workout Tracker AI!</h3>
+                                <p>Please click the button below to verify your email address and activate your account:</p>
+                                <a href="{verify_link}" style="background-color: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold; display: inline-block;">Verify Account</a>
+                                """
+                            })
+                            st.success("Account created! A verification link has been sent to your email.")
+                        except Exception as resend_err:
+                            st.error(f"Failed to send verification email: {resend_err}")
+                        
                         cursor.close()
                         conn.close()
-                        st.success("Account registered! Please log in inside the Login tab.")
                     except psycopg2.errors.UniqueViolation:
                         st.error("An account with this email already exists.")
                     except Exception as e:
                         st.error(f"Registration failed: {e}")
         
+        # TAB 3: RESET PASSWORD
         with tab_reset:
             st.subheader("Forgot Password?")
             reset_email = st.text_input("Account Email", key="reset_email")
             if st.button("Send Reset Link", use_container_width=True):
+                clean_email = reset_email.strip().lower()
                 conn = get_db_connection()
                 cursor = conn.cursor()
-                cursor.execute("SELECT id FROM users WHERE email = %s;", (reset_email,))
+                cursor.execute("SELECT id FROM users WHERE email = %s;", (clean_email,))
                 user = cursor.fetchone()
                 
                 if user:
@@ -152,18 +242,17 @@ with st.sidebar:
                     )
                     conn.commit()
                     
-                    app_url = st.query_params.get("app_url", "https://your-app-name.onrender.com")
+                    app_url = "https://your-app-name.onrender.com"
                     confirm_link = f"{app_url}?confirm_reset={token}"
                     
                     try:
                         resend.Emails.send({
                             "from": "Workout AI <onboarding@resend.dev>",
-                            "to": [reset_email],
+                            "to": [clean_email],
                             "subject": "Confirm Password Change",
                             "html": f"""
                             <p>You requested a password change. Click the button below to confirm:</p>
                             <a href="{confirm_link}" style="background-color: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">Confirm Password Reset</a>
-                            <p>Or copy this link: {confirm_link}</p>
                             """
                         })
                         st.success("Confirmation email sent! Check your inbox.")
@@ -181,6 +270,7 @@ with st.sidebar:
             st.session_state["user_id"] = None
             st.rerun()
         
+        # CHANGE PASSWORD WHILE LOGGED IN
         st.divider()
         with st.expander("🔑 Change Password"):
             st.write("Request a password change link sent to your email.")
@@ -206,7 +296,7 @@ with st.sidebar:
                         )
                         conn.commit()
                         
-                        app_url = "https://your-app-name.onrender.com"  # Replace with your actual Render URL
+                        app_url = "https://your-app-name.onrender.com"
                         confirm_link = f"{app_url}?confirm_reset={token}"
                         
                         try:
@@ -220,12 +310,13 @@ with st.sidebar:
                                 <a href="{confirm_link}" style="background-color: #28a745; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold; display: inline-block;">Confirm Password Change</a>
                                 """
                             })
-                            st.success("Confirmation link sent to your email! Click it to finalize your change.")
+                            st.success("Confirmation link sent to your email!")
                         except Exception as e:
                             st.error(f"Failed to send email: {e}")
                     cursor.close()
                     conn.close()
         
+        # DANGER ZONE / ACCOUNT DEACTIVATION
         st.divider()
         with st.expander("⚠️ Danger Zone"):
             st.write("Deactivating your account deletes all your workouts and frees up your email.")
@@ -237,7 +328,7 @@ with st.sidebar:
                 cursor.execute("SELECT email FROM users WHERE id = %s;", (st.session_state["user_id"],))
                 user_data = cursor.fetchone()
                 
-                if user_data and confirm_email.strip() == user_data["email"]:
+                if user_data and confirm_email.strip().lower() == user_data["email"]:
                     cursor.execute("DELETE FROM sets WHERE workout_id IN (SELECT id FROM workouts WHERE user_id = %s);",
                                    (st.session_state["user_id"],))
                     cursor.execute("DELETE FROM workouts WHERE user_id = %s;", (st.session_state["user_id"],))
@@ -253,6 +344,7 @@ with st.sidebar:
                 cursor.close()
                 conn.close()
 
+# --- MAIN DASHBOARD VIEW ---
 if not is_logged_in:
     st.info("👋 Please log in or register via the sidebar to access your workout portal.")
 else:
@@ -263,6 +355,7 @@ else:
         "🧠 AI Personal Coach"
     ])
     
+    # --- TAB 1: LOG WORKOUT ---
     with tab_log:
         st.header("Log with Natural Language")
         st.write("Describe your session like a journal entry. AI will map it to database exercises.")
@@ -324,9 +417,10 @@ else:
                     except Exception as e:
                         st.error(f"Failed to log workout: {e}")
     
+    # --- TAB 2: HISTORY & EDIT/DELETE BUTTONS ---
     with tab_history:
         st.subheader("📅 Manage Workout History")
-        st.caption("Edit workout names inline or click 'Delete Day' to remove a workout session permanently.")
+        st.caption("Edit workout names inline or click 'Delete' to permanently remove an entire session.")
         
         try:
             conn = get_db_connection()
@@ -386,6 +480,7 @@ else:
         except Exception as e:
             st.error(f"Error loading history: {e}")
     
+    # --- TAB 3: COACHING ADVICE ---
     with tab_coach:
         st.header("🧠 AI Personal Coach Insights")
         st.write("Let the AI evaluate your progression targets and provide progressive overload goals.")
