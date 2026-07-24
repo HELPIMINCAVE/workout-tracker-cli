@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from ai_service import AIService
-import time, os, random, string, secrets, psycopg2, resend
+import time, os, random, string, secrets, psycopg2, resend, re
 from datetime import datetime, timedelta
 from psycopg2.extras import RealDictCursor
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -29,6 +29,10 @@ def get_db_connection():
             if attempt == retries - 1:
                 raise e
             time.sleep(2)
+
+def is_valid_email(email: str) -> bool:
+    pattern = r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$"
+    return re.match(pattern, email.strip()) is not None
 
 st.set_page_config(
     page_title="Workout Tracker AI",
@@ -106,6 +110,10 @@ with st.sidebar:
             if st.button("Register Account", use_container_width=True):
                 if not reg_email or not reg_password:
                     st.warning("Please fill out both fields.")
+                elif not is_valid_email(reg_email):
+                    st.error("Please enter a valid email address (e.g., user@example.com).")
+                elif len(reg_password) < 6:
+                    st.warning("Password must be at least 6 characters long.")
                 else:
                     try:
                         conn = get_db_connection()
@@ -114,7 +122,7 @@ with st.sidebar:
                         
                         cursor.execute(
                             "INSERT INTO users (email, password) VALUES (%s, %s);",
-                            (reg_email, hashed_password)
+                            (reg_email.strip().lower(), hashed_password)
                         )
                         conn.commit()
                         cursor.close()
