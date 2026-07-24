@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from ai_service import AIService
-import time, os, re, secrets, psycopg, resend, dns.resolver
+import time, os, re, secrets, psycopg2, resend, dns.resolver
 from datetime import datetime, timedelta
 from psycopg2.extras import RealDictCursor
 from werkzeug.security import generate_password_hash, check_password_hash
