@@ -1,17 +1,20 @@
 import streamlit as st
 import pandas as pd
 from ai_service import AIService
-import time, os, random, string, resend, psycopg2
+import time, os, random, string, secrets, psycopg2, resend
 from datetime import datetime, timedelta
 from psycopg2.extras import RealDictCursor
-from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.security import generate_password_hash, check_password_has
 
 resend.api_key = os.environ.get("RESEND_API_KEY")
+
 query_params = st.query_params
+
 if "ping" in query_params:
     st.write("OK")
     st.stop()
 
+confirm_token = query_params.get("confirm_reset")
 
 def get_db_connection():
     db_url = os.environ.get("DATABASE_URL")
@@ -27,13 +30,38 @@ def get_db_connection():
                 raise e
             time.sleep(2)
 
-
 st.set_page_config(
     page_title="Workout Tracker AI",
     page_icon="🏋️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+if confirm_token:
+    st.title("🔒 Password Change Confirmation")
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT pr.id, pr.user_id, pr.pending_password
+            FROM password_resets pr
+            WHERE pr.token = %s AND pr.expires_at > NOW()
+            ORDER BY pr.expires_at DESC LIMIT 1;
+        """, (confirm_token,))
+        
+        req = cursor.fetchone()
+        if req and req["pending_password"]:
+            cursor.execute("UPDATE users SET password = %s WHERE id = %s;", (req["pending_password"], req["user_id"]))
+            cursor.execute("DELETE FROM password_resets WHERE user_id = %s;", (req["user_id"],))
+            conn.commit()
+            st.success("🎉 Your password has been successfully updated! You can now log in with your new password.")
+        else:
+            st.error("Invalid or expired password reset link.")
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        st.error(f"Error updating password: {e}")
+    st.stop()
 
 if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
@@ -99,69 +127,44 @@ with st.sidebar:
         
         with tab_reset:
             st.subheader("Forgot Password?")
-            reset_step = st.radio("Step", ["1. Request PIN", "2. Reset Password"], key="reset_step_radio")
-            
-            if reset_step == "1. Request PIN":
-                reset_email = st.text_input("Account Email", key="reset_email")
-                if st.button("Send Reset PIN", use_container_width=True):
-                    conn = get_db_connection()
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT id FROM users WHERE email = %s;", (reset_email,))
-                    user = cursor.fetchone()
-                    
-                    if user:
-                        pin = ''.join(random.choices(string.digits, k=6))
-                        expires_at = datetime.now() + timedelta(minutes=15)
-                        
-                        cursor.execute(
-                            "INSERT INTO password_resets (user_id, token, expires_at) VALUES (%s, %s, %s);",
-                            (user["id"], pin, expires_at)
-                        )
-                        conn.commit()
-                        
-                        try:
-                            resend.Emails.send({
-                                "from": "Workout AI <onboarding@resend.dev>",
-                                "to": [reset_email],
-                                "subject": "Password Reset Verification Code",
-                                "html": f"<p>Your password reset code is: <strong>{pin}</strong>. It expires in 15 minutes.</p>"
-                            })
-                            st.success("Verification PIN sent to your email!")
-                        except Exception as resend_err:
-                            st.error(f"Failed to send email: {resend_err}")
-                    else:
-                        st.error("No account found with that email.")
-                    cursor.close()
-                    conn.close()
-            
-            elif reset_step == "2. Reset Password":
-                verify_email = st.text_input("Account Email", key="verify_email")
-                pin_input = st.text_input("6-Digit PIN", key="pin_input")
-                new_password = st.text_input("New Password", type="password", key="new_password")
+            reset_email = st.text_input("Account Email", key="reset_email")
+            if st.button("Send Reset Link", use_container_width=True):
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute("SELECT id FROM users WHERE email = %s;", (reset_email,))
+                user = cursor.fetchone()
                 
-                if st.button("Confirm Reset", use_container_width=True):
-                    conn = get_db_connection()
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                        SELECT pr.id, pr.user_id
-                        FROM password_resets pr
-                        JOIN users u ON u.id = pr.user_id
-                        WHERE u.email = %s AND pr.token = %s AND pr.expires_at > NOW()
-                        ORDER BY pr.expires_at DESC LIMIT 1;
-                    """, (verify_email, pin_input))
+                if user:
+                    token = secrets.token_urlsafe(16)
+                    expires_at = datetime.now() + timedelta(minutes=15)
                     
-                    reset_req = cursor.fetchone()
-                    if reset_req:
-                        new_hashed = generate_password_hash(new_password)
-                        cursor.execute("UPDATE users SET password = %s WHERE id = %s;",
-                                       (new_hashed, reset_req["user_id"]))
-                        cursor.execute("DELETE FROM password_resets WHERE user_id = %s;", (reset_req["user_id"],))
-                        conn.commit()
-                        st.success("Password updated! You can now log in.")
-                    else:
-                        st.error("Invalid or expired PIN.")
-                    cursor.close()
-                    conn.close()
+                    cursor.execute(
+                        "INSERT INTO password_resets (user_id, token, expires_at) VALUES (%s, %s, %s);",
+                        (user["id"], token, expires_at)
+                    )
+                    conn.commit()
+                    
+                    app_url = st.query_params.get("app_url", "https://your-app-name.onrender.com")
+                    confirm_link = f"{app_url}?confirm_reset={token}"
+                    
+                    try:
+                        resend.Emails.send({
+                            "from": "Workout AI <onboarding@resend.dev>",
+                            "to": [reset_email],
+                            "subject": "Confirm Password Change",
+                            "html": f"""
+                            <p>You requested a password change. Click the button below to confirm:</p>
+                            <a href="{confirm_link}" style="background-color: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">Confirm Password Reset</a>
+                            <p>Or copy this link: {confirm_link}</p>
+                            """
+                        })
+                        st.success("Confirmation email sent! Check your inbox.")
+                    except Exception as resend_err:
+                        st.error(f"Failed to send email: {resend_err}")
+                else:
+                    st.error("No account found with that email.")
+                cursor.close()
+                conn.close()
     
     else:
         st.success("Authorized Session Active")
@@ -169,6 +172,51 @@ with st.sidebar:
             st.session_state["logged_in"] = False
             st.session_state["user_id"] = None
             st.rerun()
+        
+        st.divider()
+        with st.expander("🔑 Change Password"):
+            st.write("Request a password change link sent to your email.")
+            new_pass = st.text_input("New Password", type="password", key="logged_in_new_pass")
+            
+            if st.button("Send Password Change Link", type="primary"):
+                if not new_pass:
+                    st.warning("Please type a new password.")
+                else:
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT email FROM users WHERE id = %s;", (st.session_state["user_id"],))
+                    user_data = cursor.fetchone()
+                    
+                    if user_data:
+                        token = secrets.token_urlsafe(16)
+                        expires_at = datetime.now() + timedelta(minutes=15)
+                        hashed_new_pass = generate_password_hash(new_pass)
+                        
+                        cursor.execute(
+                            "INSERT INTO password_resets (user_id, token, pending_password, expires_at) VALUES (%s, %s, %s, %s);",
+                            (st.session_state["user_id"], token, hashed_new_pass, expires_at)
+                        )
+                        conn.commit()
+                        
+                        app_url = "https://your-app-name.onrender.com"  # Replace with your actual Render URL
+                        confirm_link = f"{app_url}?confirm_reset={token}"
+                        
+                        try:
+                            resend.Emails.send({
+                                "from": "Workout AI <onboarding@resend.dev>",
+                                "to": [user_data["email"]],
+                                "subject": "Confirm Your Password Change",
+                                "html": f"""
+                                <h3>Password Change Confirmation</h3>
+                                <p>Click the button below to confirm changing your account password:</p>
+                                <a href="{confirm_link}" style="background-color: #28a745; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold; display: inline-block;">Confirm Password Change</a>
+                                """
+                            })
+                            st.success("Confirmation link sent to your email! Click it to finalize your change.")
+                        except Exception as e:
+                            st.error(f"Failed to send email: {e}")
+                    cursor.close()
+                    conn.close()
         
         st.divider()
         with st.expander("⚠️ Danger Zone"):
@@ -270,8 +318,7 @@ else:
     
     with tab_history:
         st.subheader("📅 Manage Workout History")
-        st.caption(
-            "Double-click cells to edit names, check 'Delete?' to remove entries, or click 'Undo' to cancel unsaved edits.")
+        st.caption("Edit workout names inline or click 'Delete Day' to remove a workout session permanently.")
         
         try:
             conn = get_db_connection()
@@ -285,49 +332,47 @@ else:
             conn.close()
             
             if workouts:
-                df = pd.DataFrame(workouts)
-                df["created_at"] = df["created_at"].astype(str)
-                df["Delete"] = False
-                
-                edited_df = st.data_editor(
-                    df,
-                    column_config={
-                        "id": st.column_config.NumberColumn("Workout ID", disabled=True),
-                        "name": st.column_config.TextColumn("Workout Name"),
-                        "created_at": st.column_config.TextColumn("Date Logged", disabled=True),
-                        "Delete": st.column_config.CheckboxColumn("Delete?"),
-                    },
-                    hide_index=True,
-                    use_container_width=True,
-                    key="workout_history_editor"
-                )
-                
-                col_save, col_undo = st.columns([1, 1])
-                
-                with col_save:
-                    if st.button("💾 Save Table Changes", type="primary"):
-                        conn = get_db_connection()
-                        cursor = conn.cursor()
+                for w in workouts:
+                    with st.container():
+                        col_id, col_name, col_date, col_actions = st.columns([1, 4, 3, 2])
                         
-                        for index, row in edited_df.iterrows():
-                            if row["Delete"]:
-                                cursor.execute("DELETE FROM sets WHERE workout_id = %s;", (row["id"],))
-                                cursor.execute("DELETE FROM workouts WHERE id = %s;", (row["id"],))
-                            else:
-                                cursor.execute(
-                                    "UPDATE workouts SET name = %s WHERE id = %s;",
-                                    (row["name"], row["id"])
-                                )
+                        with col_id:
+                            st.write(f"**#{w['id']}**")
                         
-                        conn.commit()
-                        cursor.close()
-                        conn.close()
-                        st.success("Changes saved successfully!")
-                        st.rerun()
-                
-                with col_undo:
-                    if st.button("↩️ Discard / Undo Unsaved Edits"):
-                        st.rerun()
+                        with col_name:
+                            new_name = st.text_input("Name", value=w["name"], key=f"name_{w['id']}",
+                                                     label_visibility="collapsed")
+                        
+                        with col_date:
+                            st.write(str(w["created_at"])[:16])
+                        
+                        with col_actions:
+                            col_save_btn, col_del_btn = st.columns([1, 1])
+                            
+                            with col_save_btn:
+                                if st.button("💾", key=f"save_{w['id']}", help="Save Name Edit"):
+                                    conn = get_db_connection()
+                                    cursor = conn.cursor()
+                                    cursor.execute("UPDATE workouts SET name = %s WHERE id = %s;", (new_name, w["id"]))
+                                    conn.commit()
+                                    cursor.close()
+                                    conn.close()
+                                    st.toast("Workout updated!")
+                                    st.rerun()
+                            
+                            with col_del_btn:
+                                if st.button("🗑️ Delete", key=f"del_{w['id']}", type="secondary",
+                                             help="Delete entire workout day"):
+                                    conn = get_db_connection()
+                                    cursor = conn.cursor()
+                                    cursor.execute("DELETE FROM sets WHERE workout_id = %s;", (w["id"],))
+                                    cursor.execute("DELETE FROM workouts WHERE id = %s;", (w["id"],))
+                                    conn.commit()
+                                    cursor.close()
+                                    conn.close()
+                                    st.toast(f"Deleted workout #{w['id']}")
+                                    st.rerun()
+                        st.divider()
             else:
                 st.info("No workouts logged yet!")
         except Exception as e:
