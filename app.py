@@ -1,27 +1,18 @@
 import streamlit as st
 import pandas as pd
 from ai_service import AIService
-import time
-import os
-import random
-import string
+import time, os, random, string, resend, psycopg2
 from datetime import datetime, timedelta
-import psycopg2
 from psycopg2.extras import RealDictCursor
 from werkzeug.security import generate_password_hash, check_password_hash
-import resend
 
-# Initialize Resend API Key
 resend.api_key = os.environ.get("RESEND_API_KEY")
-
-# 1. Handle cron-job.org light ping rule
 query_params = st.query_params
 if "ping" in query_params:
     st.write("OK")
     st.stop()
 
 
-# 2. Database Connection Helper
 def get_db_connection():
     db_url = os.environ.get("DATABASE_URL")
     if not db_url:
@@ -37,7 +28,6 @@ def get_db_connection():
             time.sleep(2)
 
 
-# Page setup
 st.set_page_config(
     page_title="Workout Tracker AI",
     page_icon="🏋️",
@@ -45,7 +35,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Initialize Session State tracking
 if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
 if "user_id" not in st.session_state:
@@ -53,7 +42,6 @@ if "user_id" not in st.session_state:
 
 is_logged_in = st.session_state["logged_in"]
 
-# Sidebar authentication layout
 with st.sidebar:
     st.title("🏋️ Workout Tracker AI")
     st.write("Log workouts naturally & get smart coaching.")
@@ -62,7 +50,6 @@ with st.sidebar:
     if not is_logged_in:
         tab_login, tab_register, tab_reset = st.tabs(["Login", "Register", "Reset Password"])
         
-        # --- TAB 1: LOGIN ---
         with tab_login:
             email = st.text_input("Email", key="login_email")
             password = st.text_input("Password", type="password", key="login_pass")
@@ -85,7 +72,6 @@ with st.sidebar:
                 except Exception as e:
                     st.error(f"Login error: {e}")
         
-        # --- TAB 2: REGISTER ---
         with tab_register:
             reg_email = st.text_input("Email", key="reg_email")
             reg_password = st.text_input("Password", type="password", key="reg_pass")
@@ -111,7 +97,6 @@ with st.sidebar:
                     except Exception as e:
                         st.error(f"Registration failed: {e}")
         
-        # --- TAB 3: PASSWORD RESET VIA RESEND ---
         with tab_reset:
             st.subheader("Forgot Password?")
             reset_step = st.radio("Step", ["1. Request PIN", "2. Reset Password"], key="reset_step_radio")
@@ -128,14 +113,12 @@ with st.sidebar:
                         pin = ''.join(random.choices(string.digits, k=6))
                         expires_at = datetime.now() + timedelta(minutes=15)
                         
-                        # Store PIN in DB
                         cursor.execute(
                             "INSERT INTO password_resets (user_id, token, expires_at) VALUES (%s, %s, %s);",
                             (user["id"], pin, expires_at)
                         )
                         conn.commit()
                         
-                        # Send via Resend API
                         try:
                             resend.Emails.send({
                                 "from": "Workout AI <onboarding@resend.dev>",
@@ -187,7 +170,6 @@ with st.sidebar:
             st.session_state["user_id"] = None
             st.rerun()
         
-        # --- DANGER ZONE / ACCOUNT DEACTIVATION ---
         st.divider()
         with st.expander("⚠️ Danger Zone"):
             st.write("Deactivating your account deletes all your workouts and frees up your email.")
@@ -196,14 +178,14 @@ with st.sidebar:
             if st.button("Delete Account Permanently", type="primary"):
                 conn = get_db_connection()
                 cursor = conn.cursor()
-                cursor.execute("SELECT email FROM users WHERE id = %s;", (current_user_id,))
+                cursor.execute("SELECT email FROM users WHERE id = %s;", (st.session_state["user_id"],))
                 user_data = cursor.fetchone()
                 
                 if user_data and confirm_email.strip() == user_data["email"]:
                     cursor.execute("DELETE FROM sets WHERE workout_id IN (SELECT id FROM workouts WHERE user_id = %s);",
-                                   (current_user_id,))
-                    cursor.execute("DELETE FROM workouts WHERE user_id = %s;", (current_user_id,))
-                    cursor.execute("DELETE FROM users WHERE id = %s;", (current_user_id,))
+                                   (st.session_state["user_id"],))
+                    cursor.execute("DELETE FROM workouts WHERE user_id = %s;", (st.session_state["user_id"],))
+                    cursor.execute("DELETE FROM users WHERE id = %s;", (st.session_state["user_id"],))
                     conn.commit()
                     
                     st.session_state["logged_in"] = False
@@ -215,7 +197,6 @@ with st.sidebar:
                 cursor.close()
                 conn.close()
 
-# Dashboard View logic
 if not is_logged_in:
     st.info("👋 Please log in or register via the sidebar to access your workout portal.")
 else:
@@ -226,14 +207,13 @@ else:
         "🧠 AI Personal Coach"
     ])
     
-    # --- TAB 1: LOG WORKOUT ---
     with tab_log:
         st.header("Log with Natural Language")
         st.write("Describe your session like a journal entry. AI will map it to database exercises.")
         
         raw_notes = st.text_area(
             "What did you train today?",
-            placeholder="e.g., Did 3 sets of Bench Press with 10 reps at 135 lbs, then 3 sets of Squats with 8 reps at 225 lbs.",
+            placeholder="e.g., Did 3 sets of Bench Press with 10 reps at 135 lbs, then 3 sets of Push-ups with 20 reps.",
             height=120
         )
         
@@ -268,10 +248,14 @@ else:
                             workout_id = cursor.fetchone()["id"]
                             
                             for s in sets:
+                                weight_val = s.get("weight") if s.get("weight") is not None else 0.0
+                                reps_val = s.get("reps") if s.get("reps") is not None else 1
+                                set_order_val = s.get("set_order") if s.get("set_order") is not None else 1
+                                
                                 cursor.execute(
                                     """INSERT INTO sets (workout_id, exercise_id, reps, weight, set_order)
                                        VALUES (%s, %s, %s, %s, %s);""",
-                                    (workout_id, s["exercise_id"], s["reps"], s["weight"], s["set_order"])
+                                    (workout_id, s["exercise_id"], reps_val, weight_val, set_order_val)
                                 )
                             
                             conn.commit()
@@ -284,7 +268,6 @@ else:
                     except Exception as e:
                         st.error(f"Failed to log workout: {e}")
     
-    # --- TAB 2: HISTORY & EDIT/UNDO/DELETE MANAGEMENT ---
     with tab_history:
         st.subheader("📅 Manage Workout History")
         st.caption(
@@ -350,7 +333,6 @@ else:
         except Exception as e:
             st.error(f"Error loading history: {e}")
     
-    # --- TAB 3: COACHING ADVICE ---
     with tab_coach:
         st.header("🧠 AI Personal Coach Insights")
         st.write("Let the AI evaluate your progression targets and provide progressive overload goals.")
