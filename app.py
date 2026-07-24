@@ -4,7 +4,7 @@ from ai_service import AIService
 import time, os, random, string, secrets, psycopg2, resend
 from datetime import datetime, timedelta
 from psycopg2.extras import RealDictCursor
-from werkzeug.security import generate_password_hash, check_password_has
+from werkzeug.security import generate_password_hash, check_password_hash
 
 resend.api_key = os.environ.get("RESEND_API_KEY")
 
