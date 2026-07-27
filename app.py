@@ -273,7 +273,7 @@ with st.sidebar:
                     )
                     conn.commit()
                     
-                    app_url = "https://your-app-name.onrender.com"
+                    app_url = "https://workout-tracker-cli.onrender.com"
                     confirm_link = f"{app_url}?confirm_reset={token}"
                     
                     try:
