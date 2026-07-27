@@ -228,7 +228,7 @@ with st.sidebar:
                         )
                         conn.commit()
                         
-                        app_url = "https://your-app-name.onrender.com"  # Replace with your actual Render URL
+                        app_url = "https://workout-tracker-cli.onrender.com"
                         verify_link = f"{app_url}?verify_account={token}"
                         
                         try:
@@ -326,7 +326,7 @@ with st.sidebar:
                         )
                         conn.commit()
                         
-                        app_url = "https://your-app-name.onrender.com"
+                        app_url = "https://workout-tracker-cli.onrender.com"
                         confirm_link = f"{app_url}?confirm_reset={token}"
                         
                         try:
