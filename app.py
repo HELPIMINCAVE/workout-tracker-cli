@@ -128,6 +128,7 @@ with st.sidebar:
         with tab_login:
             email = st.text_input("Email", key="login_email")
             password = st.text_input("Password", type="password", key="login_pass")
+            
             if st.button("Login", use_container_width=True):
                 try:
                     conn = get_db_connection()
@@ -142,6 +143,8 @@ with st.sidebar:
                         if not user.get("is_verified", True):
                             st.error(
                                 "Please verify your email address via the link sent to your inbox before logging in.")
+                            st.session_state["unverified_user_id"] = user["id"]
+                            st.session_state["unverified_email"] = email.strip().lower()
                         else:
                             st.session_state["logged_in"] = True
                             st.session_state["user_id"] = user["id"]
@@ -151,6 +154,45 @@ with st.sidebar:
                         st.error("Invalid credentials.")
                 except Exception as e:
                     st.error(f"Login error: {e}")
+            
+            if "unverified_email" in st.session_state and st.session_state["unverified_email"] == email.strip().lower():
+                st.divider()
+                st.warning("Didn't get the email?")
+                if st.button("📩 Resend Verification Link", use_container_width=True):
+                    try:
+                        conn = get_db_connection()
+                        cursor = conn.cursor()
+                        user_id = st.session_state["unverified_user_id"]
+                        
+                        cursor.execute("DELETE FROM password_resets WHERE user_id = %s;", (user_id,))
+                        
+                        token = secrets.token_urlsafe(16)
+                        expires_at = datetime.now() + timedelta(hours=24)
+                        
+                        cursor.execute(
+                            "INSERT INTO password_resets (user_id, token, expires_at) VALUES (%s, %s, %s);",
+                            (user_id, token, expires_at)
+                        )
+                        conn.commit()
+                        cursor.close()
+                        conn.close()
+                        
+                        app_url = "https://workout-tracker-cli.onrender.com"
+                        verify_link = f"{app_url}?verify_account={token}"
+                        
+                        resend.Emails.send({
+                            "from": "Workout AI <onboarding@resend.dev>",
+                            "to": [st.session_state["unverified_email"]],
+                            "subject": "Verify Your Workout AI Account",
+                            "html": f"""
+                            <h3>Welcome to Workout Tracker AI!</h3>
+                            <p>Here is your new verification link. Click the button below to activate your account:</p>
+                            <a href="{verify_link}" style="background-color: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold; display: inline-block;">Verify Account</a>
+                            """
+                        })
+                        st.success("A new verification link has been sent to your inbox!")
+                    except Exception as resend_err:
+                        st.error(f"Failed to resend email: {resend_err}")
         
         with tab_register:
             reg_email = st.text_input("Email", key="reg_email")
