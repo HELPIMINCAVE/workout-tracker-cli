@@ -21,6 +21,7 @@ if "ping" in query_params:
 APP_URL = "https://workout-tracker-cli.onrender.com".rstrip("/")
 resend.api_key = os.environ.get("RESEND_API_KEY")
 
+
 def get_db_connection():
     db_url = os.environ.get("DATABASE_URL")
     if not db_url:
@@ -35,9 +36,15 @@ def get_db_connection():
                 raise e
             time.sleep(2)
 
+
+def generate_otp() -> str:
+    return f"{secrets.randbelow(1000000):06d}"
+
+
 def is_valid_email_format(email: str) -> bool:
     pattern = r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$"
     return re.match(pattern, email.strip()) is not None
+
 
 def domain_has_mx_records(email: str) -> bool:
     try:
@@ -51,94 +58,34 @@ def domain_has_mx_records(email: str) -> bool:
 def validate_password_strength(password: str):
     if len(password) < 10:
         return False, "Password must be at least 10 characters long."
-    
     if not re.search(r"[A-Z]", password):
         return False, "Password must contain at least 1 uppercase letter."
-    
     if not re.search(r"[0-9]", password):
         return False, "Password must contain at least 1 number."
-    
     if not re.search(r"[!@#$%^&*()_+\-=\[\]{};':\"\\|,.<>/?~`]", password):
-        return False, "Password must contain at least 1 symbol (e.g., !@#$%^&*)."
+        return False, "Password must contain at least 1 symbol."
     
     lower_pass = password.lower()
     for i in range(len(lower_pass) - 3):
         chunk = lower_pass[i:i + 4]
-        
         if all(ord(chunk[j + 1]) - ord(chunk[j]) == 1 for j in range(3)):
-            return False, f"Password cannot contain sequential sequences like '{chunk}'."
-        
+            return False, f"Password cannot contain sequential patterns like '{chunk}'."
         if all(ord(chunk[j]) - ord(chunk[j + 1]) == 1 for j in range(3)):
-            return False, f"Password cannot contain sequential sequences like '{chunk}'."
+            return False, f"Password cannot contain sequential patterns like '{chunk}'."
     
     return True, ""
 
-if "verify_account" in query_params:
-    verify_token = query_params["verify_account"]
-    st.title("✅ Account Verification")
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT pr.id, pr.user_id
-            FROM password_resets pr
-            WHERE pr.token = %s AND pr.expires_at > NOW()
-            ORDER BY pr.expires_at DESC LIMIT 1;
-        """, (verify_token,))
-        
-        req = cursor.fetchone()
-        if req:
-            cursor.execute("UPDATE users SET is_verified = TRUE WHERE id = %s;", (req["user_id"],))
-            cursor.execute("DELETE FROM password_resets WHERE user_id = %s;", (req["user_id"],))
-            conn.commit()
-            st.success("🎉 Your account has been verified! You can now log in.")
-            st.info("Click below to proceed to the login page:")
-            if st.button("Go to Login"):
-                st.query_params.clear()
-                st.rerun()
-        else:
-            st.error("Invalid or expired verification link.")
-        cursor.close()
-        conn.close()
-    except Exception as e:
-        st.error(f"Verification error: {e}")
-    st.stop()
-
-if "confirm_reset" in query_params:
-    confirm_token = query_params["confirm_reset"]
-    st.title("🔒 Password Change Confirmation")
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT pr.id, pr.user_id, pr.pending_password
-            FROM password_resets pr
-            WHERE pr.token = %s AND pr.expires_at > NOW()
-            ORDER BY pr.expires_at DESC LIMIT 1;
-        """, (confirm_token,))
-        
-        req = cursor.fetchone()
-        if req and req["pending_password"]:
-            cursor.execute("UPDATE users SET password = %s WHERE id = %s;", (req["pending_password"], req["user_id"]))
-            cursor.execute("DELETE FROM password_resets WHERE user_id = %s;", (req["user_id"],))
-            conn.commit()
-            st.success("🎉 Your password has been updated! You can now log in with your new password.")
-            st.info("Click below to proceed to the login page:")
-            if st.button("Go to Login"):
-                st.query_params.clear()
-                st.rerun()
-        else:
-            st.error("Invalid or expired password reset link.")
-        cursor.close()
-        conn.close()
-    except Exception as e:
-        st.error(f"Error updating password: {e}")
-    st.stop()
 
 if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
 if "user_id" not in st.session_state:
     st.session_state["user_id"] = None
+if "otp_step" not in st.session_state:
+    st.session_state["otp_step"] = None
+if "otp_user_id" not in st.session_state:
+    st.session_state["otp_user_id"] = None
+if "otp_email" not in st.session_state:
+    st.session_state["otp_email"] = None
 
 is_logged_in = st.session_state["logged_in"]
 
@@ -148,179 +95,262 @@ with st.sidebar:
     st.divider()
     
     if not is_logged_in:
-        tab_login, tab_register, tab_reset = st.tabs(["Login", "Register", "Reset Password"])
         
-        with tab_login:
-            email = st.text_input("Email", key="login_email")
-            password = st.text_input("Password", type="password", key="login_pass")
+        if st.session_state["otp_step"] is not None:
+            st.subheader("🔑 Enter 6-Digit OTP")
+            st.caption(f"Code sent to **{st.session_state['otp_email']}** (Valid for 10 min)")
             
-            if st.button("Login", use_container_width=True):
-                try:
+            entered_otp = st.text_input("6-Digit Code", max_chars=6, key="input_otp")
+            
+            if st.session_state["otp_step"] == "verify_reg":
+                if st.button("Verify Account", type="primary", use_container_width=True):
                     conn = get_db_connection()
                     cursor = conn.cursor()
-                    cursor.execute("SELECT id, password, is_verified FROM users WHERE email = %s;",
-                                   (email.strip().lower(),))
-                    user = cursor.fetchone()
+                    cursor.execute("""
+                        SELECT id FROM password_resets
+                        WHERE user_id = %s AND token = %s AND expires_at > NOW()
+                        ORDER BY expires_at DESC LIMIT 1;
+                    """, (st.session_state["otp_user_id"], entered_otp.strip()))
+                    valid_token = cursor.fetchone()
+                    
+                    if valid_token:
+                        cursor.execute("UPDATE users SET is_verified = TRUE WHERE id = %s;",
+                                       (st.session_state["otp_user_id"],))
+                        cursor.execute("DELETE FROM password_resets WHERE user_id = %s;",
+                                       (st.session_state["otp_user_id"],))
+                        conn.commit()
+                        st.success("🎉 Email verified successfully! You can now log in.")
+                        st.session_state["otp_step"] = None
+                        st.rerun()
+                    else:
+                        st.error("Invalid or expired OTP.")
                     cursor.close()
                     conn.close()
-                    
-                    if user and check_password_hash(user["password"], password):
-                        if not user.get("is_verified", True):
-                            st.error(
-                                "Please verify your email address via the link sent to your inbox before logging in.")
-                            st.session_state["unverified_user_id"] = user["id"]
-                            st.session_state["unverified_email"] = email.strip().lower()
-                        else:
-                            st.session_state["logged_in"] = True
-                            st.session_state["user_id"] = user["id"]
-                            st.success("Logged in successfully!")
-                            st.rerun()
-                    else:
-                        st.error("Invalid credentials.")
-                except Exception as e:
-                    st.error(f"Login error: {e}")
             
-            if "unverified_email" in st.session_state and st.session_state["unverified_email"] == email.strip().lower():
-                st.divider()
-                st.warning("Didn't get the email?")
-                if st.button("📩 Resend Verification Link", use_container_width=True):
-                    try:
+            elif st.session_state["otp_step"] == "login_2fa":
+                if st.button("Verify & Login", type="primary", use_container_width=True):
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        SELECT id FROM password_resets
+                        WHERE user_id = %s AND token = %s AND expires_at > NOW()
+                        ORDER BY expires_at DESC LIMIT 1;
+                    """, (st.session_state["otp_user_id"], entered_otp.strip()))
+                    valid_token = cursor.fetchone()
+                    
+                    if valid_token:
+                        cursor.execute("DELETE FROM password_resets WHERE user_id = %s;",
+                                       (st.session_state["otp_user_id"],))
+                        conn.commit()
+                        st.session_state["logged_in"] = True
+                        st.session_state["user_id"] = st.session_state["otp_user_id"]
+                        st.session_state["otp_step"] = None
+                        st.success("Authenticated!")
+                        st.rerun()
+                    else:
+                        st.error("Invalid or expired OTP.")
+                    cursor.close()
+                    conn.close()
+            
+            elif st.session_state["otp_step"] == "reset_pass":
+                new_reset_pass = st.text_input("New Password", type="password", key="otp_new_pass")
+                if st.button("Update Password", type="primary", use_container_width=True):
+                    is_pass_valid, pass_err_msg = validate_password_strength(new_reset_pass)
+                    if not is_pass_valid:
+                        st.error(pass_err_msg)
+                    else:
                         conn = get_db_connection()
                         cursor = conn.cursor()
-                        user_id = st.session_state["unverified_user_id"]
+                        cursor.execute("""
+                            SELECT id FROM password_resets
+                            WHERE user_id = %s AND token = %s AND expires_at > NOW()
+                            ORDER BY expires_at DESC LIMIT 1;
+                        """, (st.session_state["otp_user_id"], entered_otp.strip()))
+                        valid_token = cursor.fetchone()
                         
-                        cursor.execute("DELETE FROM password_resets WHERE user_id = %s;", (user_id,))
-                        
-                        token = secrets.token_urlsafe(16)
-                        expires_at = datetime.now() + timedelta(hours=24)
-                        
-                        cursor.execute(
-                            "INSERT INTO password_resets (user_id, token, expires_at) VALUES (%s, %s, %s);",
-                            (user_id, token, expires_at)
-                        )
-                        conn.commit()
+                        if valid_token:
+                            hashed_pass = generate_password_hash(new_reset_pass)
+                            cursor.execute("UPDATE users SET password = %s WHERE id = %s;",
+                                           (hashed_pass, st.session_state["otp_user_id"]))
+                            cursor.execute("DELETE FROM password_resets WHERE user_id = %s;",
+                                           (st.session_state["otp_user_id"],))
+                            conn.commit()
+                            st.success("🎉 Password reset successfully! Please log in.")
+                            st.session_state["otp_step"] = None
+                            st.rerun()
+                        else:
+                            st.error("Invalid or expired OTP.")
                         cursor.close()
                         conn.close()
-                        
-                        verify_link = f"{APP_URL}?verify_account={token}"
-                        
-                        resend.Emails.send({
-                            "from": "Workout AI <onboarding@resend.dev>",
-                            "to": [st.session_state["unverified_email"]],
-                            "subject": "Verify Your Workout AI Account",
-                            "html": f"""
-                            <h3>Welcome to Workout Tracker AI!</h3>
-                            <p>Here is your new verification link. Click the button below to activate your account:</p>
-                            <a href="{verify_link}" style="background-color: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold; display: inline-block;">Verify Account</a>
-                            """
-                        })
-                        st.success("A new verification link has been sent to your inbox!")
-                    except Exception as resend_err:
-                        st.error(f"Failed to resend email: {resend_err}")
+            
+            if st.button("Cancel / Back", use_container_width=True):
+                st.session_state["otp_step"] = None
+                st.rerun()
         
-        with tab_register:
-            reg_email = st.text_input("Email", key="reg_email")
-            reg_password = st.text_input("Password", type="password", key="reg_pass")
+        else:
+            tab_login, tab_register, tab_reset = st.tabs(["Login", "Register", "Reset Password"])
             
-            st.caption(
-                "Password requirements: 10+ chars, 1 uppercase, 1 number, 1 symbol, no sequential patterns (e.g., 1234 or abcd).")
-            
-            if st.button("Register Account", use_container_width=True):
-                clean_email = reg_email.strip().lower()
-                is_pass_valid, pass_err_msg = validate_password_strength(reg_password)
+            with tab_login:
+                email = st.text_input("Email", key="login_email")
+                password = st.text_input("Password", type="password", key="login_pass")
                 
-                if not clean_email or not reg_password:
-                    st.warning("Please fill out both fields.")
-                elif not is_valid_email_format(clean_email):
-                    st.error("Please enter a valid email address format (e.g., user@example.com).")
-                elif not domain_has_mx_records(clean_email):
-                    st.error("This email domain doesn't exist or cannot receive emails.")
-                elif not is_pass_valid:
-                    st.error(f"Weak Password: {pass_err_msg}")
-                else:
+                if st.button("Login", use_container_width=True):
                     try:
                         conn = get_db_connection()
                         cursor = conn.cursor()
-                        hashed_password = generate_password_hash(reg_password)
+                        cursor.execute("SELECT id, password, is_verified FROM users WHERE email = %s;",
+                                       (email.strip().lower(),))
+                        user = cursor.fetchone()
                         
-                        cursor.execute(
-                            "INSERT INTO users (email, password, is_verified) VALUES (%s, %s, FALSE) RETURNING id;",
-                            (clean_email, hashed_password)
-                        )
-                        new_user_id = cursor.fetchone()["id"]
-                        
-                        token = secrets.token_urlsafe(16)
-                        expires_at = datetime.now() + timedelta(hours=24)
-                        
-                        cursor.execute(
-                            "INSERT INTO password_resets (user_id, token, expires_at) VALUES (%s, %s, %s);",
-                            (new_user_id, token, expires_at)
-                        )
-                        conn.commit()
-                        
-                        verify_link = f"{APP_URL}?verify_account={token}"
-                        
-                        try:
+                        if user and check_password_hash(user["password"], password):
+                            clean_email = email.strip().lower()
+                            user_id = user["id"]
+                            
+                            if not user.get("is_verified", True):
+                                st.warning("Account unverified. Sending verification OTP...")
+                                st.session_state["otp_step"] = "verify_reg"
+                            else:
+                                st.session_state["otp_step"] = "login_2fa"
+                            
+                            otp_code = generate_otp()
+                            expires_at = datetime.now() + timedelta(minutes=10)
+                            
+                            cursor.execute("DELETE FROM password_resets WHERE user_id = %s;", (user_id,))
+                            cursor.execute(
+                                "INSERT INTO password_resets (user_id, token, expires_at) VALUES (%s, %s, %s);",
+                                (user_id, otp_code, expires_at)
+                            )
+                            conn.commit()
+                            
                             resend.Emails.send({
                                 "from": "Workout AI <onboarding@resend.dev>",
                                 "to": [clean_email],
-                                "subject": "Verify Your Workout AI Account",
+                                "subject": f"Your Verification Code: {otp_code}",
                                 "html": f"""
-                                <h3>Welcome to Workout Tracker AI!</h3>
-                                <p>Please click the button below to verify your email address and activate your account:</p>
-                                <a href="{verify_link}" style="background-color: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold; display: inline-block;">Verify Account</a>
+                                <h2>Workout Tracker AI</h2>
+                                <p>Your 6-digit OTP verification code is:</p>
+                                <h1 style="font-size: 32px; letter-spacing: 5px; color: #007bff;">{otp_code}</h1>
+                                <p>This code expires in 10 minutes.</p>
                                 """
                             })
-                            st.success("Account created! A verification link has been sent to your email.")
-                        except Exception as resend_err:
-                            st.error(f"Failed to send verification email: {resend_err}")
-                        
-                        cursor.close()
-                        conn.close()
-                    except psycopg2.errors.UniqueViolation:
-                        st.error("An account with this email already exists.")
+                            
+                            st.session_state["otp_user_id"] = user_id
+                            st.session_state["otp_email"] = clean_email
+                            cursor.close()
+                            conn.close()
+                            st.rerun()
+                        else:
+                            st.error("Invalid credentials.")
+                            cursor.close()
+                            conn.close()
                     except Exception as e:
-                        st.error(f"Registration failed: {e}")
-        
-        with tab_reset:
-            st.subheader("Forgot Password?")
-            reset_email = st.text_input("Account Email", key="reset_email")
-            if st.button("Send Reset Link", use_container_width=True):
-                clean_email = reset_email.strip().lower()
-                conn = get_db_connection()
-                cursor = conn.cursor()
-                cursor.execute("SELECT id FROM users WHERE email = %s;", (clean_email,))
-                user = cursor.fetchone()
+                        st.error(f"Login error: {e}")
+            
+            with tab_register:
+                reg_email = st.text_input("Email", key="reg_email")
+                reg_password = st.text_input("Password", type="password", key="reg_pass")
                 
-                if user:
-                    token = secrets.token_urlsafe(16)
-                    expires_at = datetime.now() + timedelta(minutes=15)
+                st.caption("Password requirements: 10+ chars, 1 uppercase, 1 number, 1 symbol, no sequential patterns.")
+                
+                if st.button("Register Account", use_container_width=True):
+                    clean_email = reg_email.strip().lower()
+                    is_pass_valid, pass_err_msg = validate_password_strength(reg_password)
                     
-                    cursor.execute(
-                        "INSERT INTO password_resets (user_id, token, expires_at) VALUES (%s, %s, %s);",
-                        (user["id"], token, expires_at)
-                    )
-                    conn.commit()
+                    if not clean_email or not reg_password:
+                        st.warning("Please fill out both fields.")
+                    elif not is_valid_email_format(clean_email):
+                        st.error("Please enter a valid email address.")
+                    elif not domain_has_mx_records(clean_email):
+                        st.error("This email domain doesn't exist.")
+                    elif not is_pass_valid:
+                        st.error(f"Weak Password: {pass_err_msg}")
+                    else:
+                        try:
+                            conn = get_db_connection()
+                            cursor = conn.cursor()
+                            hashed_password = generate_password_hash(reg_password)
+                            
+                            cursor.execute(
+                                "INSERT INTO users (email, password, is_verified) VALUES (%s, %s, FALSE) RETURNING id;",
+                                (clean_email, hashed_password)
+                            )
+                            new_user_id = cursor.fetchone()["id"]
+                            
+                            otp_code = generate_otp()
+                            expires_at = datetime.now() + timedelta(minutes=10)
+                            
+                            cursor.execute(
+                                "INSERT INTO password_resets (user_id, token, expires_at) VALUES (%s, %s, %s);",
+                                (new_user_id, otp_code, expires_at)
+                            )
+                            conn.commit()
+                            
+                            resend.Emails.send({
+                                "from": "Workout AI <onboarding@resend.dev>",
+                                "to": [clean_email],
+                                "subject": f"Verify Account OTP: {otp_code}",
+                                "html": f"""
+                                <h2>Welcome to Workout Tracker AI!</h2>
+                                <p>Your 6-digit registration OTP code is:</p>
+                                <h1 style="font-size: 32px; letter-spacing: 5px; color: #007bff;">{otp_code}</h1>
+                                <p>Enter this code in the application to complete your activation.</p>
+                                """
+                            })
+                            
+                            st.session_state["otp_step"] = "verify_reg"
+                            st.session_state["otp_user_id"] = new_user_id
+                            st.session_state["otp_email"] = clean_email
+                            
+                            cursor.close()
+                            conn.close()
+                            st.rerun()
+                        except psycopg2.errors.UniqueViolation:
+                            st.error("An account with this email already exists.")
+                        except Exception as e:
+                            st.error(f"Registration failed: {e}")
+            
+            with tab_reset:
+                st.subheader("Forgot Password?")
+                reset_email = st.text_input("Account Email", key="reset_email")
+                if st.button("Send Reset OTP", use_container_width=True):
+                    clean_email = reset_email.strip().lower()
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT id FROM users WHERE email = %s;", (clean_email,))
+                    user = cursor.fetchone()
                     
-                    confirm_link = f"{APP_URL}?confirm_reset={token}"
-                    
-                    try:
+                    if user:
+                        otp_code = generate_otp()
+                        expires_at = datetime.now() + timedelta(minutes=10)
+                        
+                        cursor.execute("DELETE FROM password_resets WHERE user_id = %s;", (user["id"],))
+                        cursor.execute(
+                            "INSERT INTO password_resets (user_id, token, expires_at) VALUES (%s, %s, %s);",
+                            (user["id"], otp_code, expires_at)
+                        )
+                        conn.commit()
+                        
                         resend.Emails.send({
                             "from": "Workout AI <onboarding@resend.dev>",
                             "to": [clean_email],
-                            "subject": "Confirm Password Change",
+                            "subject": f"Password Reset Code: {otp_code}",
                             "html": f"""
-                            <p>You requested a password change. Click the button below to confirm:</p>
-                            <a href="{confirm_link}" style="background-color: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">Confirm Password Reset</a>
+                            <h3>Password Reset Request</h3>
+                            <p>Use the following 6-digit OTP code to reset your password:</p>
+                            <h1 style="font-size: 32px; letter-spacing: 5px; color: #dc3545;">{otp_code}</h1>
                             """
                         })
-                        st.success("Confirmation email sent! Check your inbox.")
-                    except Exception as resend_err:
-                        st.error(f"Failed to send email: {resend_err}")
-                else:
-                    st.error("No account found with that email.")
-                cursor.close()
-                conn.close()
+                        
+                        st.session_state["otp_step"] = "reset_pass"
+                        st.session_state["otp_user_id"] = user["id"]
+                        st.session_state["otp_email"] = clean_email
+                        cursor.close()
+                        conn.close()
+                        st.rerun()
+                    else:
+                        st.error("No account found with that email.")
+                    cursor.close()
+                    conn.close()
     
     else:
         st.success("Authorized Session Active")
@@ -328,53 +358,6 @@ with st.sidebar:
             st.session_state["logged_in"] = False
             st.session_state["user_id"] = None
             st.rerun()
-        
-        st.divider()
-        with st.expander("🔑 Change Password"):
-            st.write("Request a password change link sent to your email.")
-            new_pass = st.text_input("New Password", type="password", key="logged_in_new_pass")
-            
-            if st.button("Send Password Change Link", type="primary"):
-                is_pass_valid, pass_err_msg = validate_password_strength(new_pass)
-                if not new_pass:
-                    st.warning("Please type a new password.")
-                elif not is_pass_valid:
-                    st.error(f"Weak Password: {pass_err_msg}")
-                else:
-                    conn = get_db_connection()
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT email FROM users WHERE id = %s;", (st.session_state["user_id"],))
-                    user_data = cursor.fetchone()
-                    
-                    if user_data:
-                        token = secrets.token_urlsafe(16)
-                        expires_at = datetime.now() + timedelta(minutes=15)
-                        hashed_new_pass = generate_password_hash(new_pass)
-                        
-                        cursor.execute(
-                            "INSERT INTO password_resets (user_id, token, pending_password, expires_at) VALUES (%s, %s, %s, %s);",
-                            (st.session_state["user_id"], token, hashed_new_pass, expires_at)
-                        )
-                        conn.commit()
-                        
-                        confirm_link = f"{APP_URL}?confirm_reset={token}"
-                        
-                        try:
-                            resend.Emails.send({
-                                "from": "Workout AI <onboarding@resend.dev>",
-                                "to": [user_data["email"]],
-                                "subject": "Confirm Your Password Change",
-                                "html": f"""
-                                <h3>Password Change Confirmation</h3>
-                                <p>Click the button below to confirm changing your account password:</p>
-                                <a href="{confirm_link}" style="background-color: #28a745; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold; display: inline-block;">Confirm Password Change</a>
-                                """
-                            })
-                            st.success("Confirmation link sent to your email!")
-                        except Exception as e:
-                            st.error(f"Failed to send email: {e}")
-                    cursor.close()
-                    conn.close()
         
         st.divider()
         with st.expander("⚠️ Danger Zone"):
@@ -396,7 +379,7 @@ with st.sidebar:
                     
                     st.session_state["logged_in"] = False
                     st.session_state["user_id"] = None
-                    st.success("Account deleted! Email is now free for new registrations.")
+                    st.success("Account deleted!")
                     st.rerun()
                 else:
                     st.error("Email verification failed. Deactivation cancelled.")
