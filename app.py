@@ -6,14 +6,20 @@ from datetime import datetime, timedelta
 from psycopg2.extras import RealDictCursor
 from werkzeug.security import generate_password_hash, check_password_hash
 
-resend.api_key = os.environ.get("RESEND_API_KEY")
-
 st.set_page_config(
     page_title="Workout Tracker AI",
     page_icon="🏋️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+query_params = st.query_params
+if "ping" in query_params:
+    st.write("OK")
+    st.stop()
+
+APP_URL = "https://workout-tracker-cli.onrender.com".rstrip("/")
+resend.api_key = os.environ.get("RESEND_API_KEY")
 
 def get_db_connection():
     db_url = os.environ.get("DATABASE_URL")
@@ -33,7 +39,6 @@ def is_valid_email_format(email: str) -> bool:
     pattern = r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$"
     return re.match(pattern, email.strip()) is not None
 
-
 def domain_has_mx_records(email: str) -> bool:
     try:
         domain = email.split('@')[1]
@@ -42,11 +47,31 @@ def domain_has_mx_records(email: str) -> bool:
     except Exception:
         return False
 
-query_params = st.query_params
 
-if "ping" in query_params:
-    st.write("OK")
-    st.stop()
+def validate_password_strength(password: str):
+    if len(password) < 10:
+        return False, "Password must be at least 10 characters long."
+    
+    if not re.search(r"[A-Z]", password):
+        return False, "Password must contain at least 1 uppercase letter."
+    
+    if not re.search(r"[0-9]", password):
+        return False, "Password must contain at least 1 number."
+    
+    if not re.search(r"[!@#$%^&*()_+\-=\[\]{};':\"\\|,.<>/?~`]", password):
+        return False, "Password must contain at least 1 symbol (e.g., !@#$%^&*)."
+    
+    lower_pass = password.lower()
+    for i in range(len(lower_pass) - 3):
+        chunk = lower_pass[i:i + 4]
+        
+        if all(ord(chunk[j + 1]) - ord(chunk[j]) == 1 for j in range(3)):
+            return False, f"Password cannot contain sequential sequences like '{chunk}'."
+        
+        if all(ord(chunk[j]) - ord(chunk[j + 1]) == 1 for j in range(3)):
+            return False, f"Password cannot contain sequential sequences like '{chunk}'."
+    
+    return True, ""
 
 if "verify_account" in query_params:
     verify_token = query_params["verify_account"]
@@ -177,8 +202,7 @@ with st.sidebar:
                         cursor.close()
                         conn.close()
                         
-                        app_url = "https://workout-tracker-cli.onrender.com"
-                        verify_link = f"{app_url}?verify_account={token}"
+                        verify_link = f"{APP_URL}?verify_account={token}"
                         
                         resend.Emails.send({
                             "from": "Workout AI <onboarding@resend.dev>",
@@ -197,16 +221,22 @@ with st.sidebar:
         with tab_register:
             reg_email = st.text_input("Email", key="reg_email")
             reg_password = st.text_input("Password", type="password", key="reg_pass")
+            
+            st.caption(
+                "Password requirements: 10+ chars, 1 uppercase, 1 number, 1 symbol, no sequential patterns (e.g., 1234 or abcd).")
+            
             if st.button("Register Account", use_container_width=True):
                 clean_email = reg_email.strip().lower()
+                is_pass_valid, pass_err_msg = validate_password_strength(reg_password)
+                
                 if not clean_email or not reg_password:
                     st.warning("Please fill out both fields.")
                 elif not is_valid_email_format(clean_email):
                     st.error("Please enter a valid email address format (e.g., user@example.com).")
                 elif not domain_has_mx_records(clean_email):
                     st.error("This email domain doesn't exist or cannot receive emails.")
-                elif len(reg_password) < 6:
-                    st.warning("Password must be at least 6 characters long.")
+                elif not is_pass_valid:
+                    st.error(f"Weak Password: {pass_err_msg}")
                 else:
                     try:
                         conn = get_db_connection()
@@ -228,8 +258,7 @@ with st.sidebar:
                         )
                         conn.commit()
                         
-                        app_url = "https://workout-tracker-cli.onrender.com"
-                        verify_link = f"{app_url}?verify_account={token}"
+                        verify_link = f"{APP_URL}?verify_account={token}"
                         
                         try:
                             resend.Emails.send({
@@ -273,8 +302,7 @@ with st.sidebar:
                     )
                     conn.commit()
                     
-                    app_url = "https://workout-tracker-cli.onrender.com"
-                    confirm_link = f"{app_url}?confirm_reset={token}"
+                    confirm_link = f"{APP_URL}?confirm_reset={token}"
                     
                     try:
                         resend.Emails.send({
@@ -307,8 +335,11 @@ with st.sidebar:
             new_pass = st.text_input("New Password", type="password", key="logged_in_new_pass")
             
             if st.button("Send Password Change Link", type="primary"):
+                is_pass_valid, pass_err_msg = validate_password_strength(new_pass)
                 if not new_pass:
                     st.warning("Please type a new password.")
+                elif not is_pass_valid:
+                    st.error(f"Weak Password: {pass_err_msg}")
                 else:
                     conn = get_db_connection()
                     cursor = conn.cursor()
@@ -326,8 +357,7 @@ with st.sidebar:
                         )
                         conn.commit()
                         
-                        app_url = "https://workout-tracker-cli.onrender.com"
-                        confirm_link = f"{app_url}?confirm_reset={token}"
+                        confirm_link = f"{APP_URL}?confirm_reset={token}"
                         
                         try:
                             resend.Emails.send({
