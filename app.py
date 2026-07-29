@@ -1,19 +1,29 @@
 import streamlit as st
 import pandas as pd
 from ai_service import AIService
-import time, os, re, secrets, psycopg2, resend, dns.resolver, sys
+import time, os, re, secrets, psycopg2, resend, dns.resolver, tornado.web
 from datetime import datetime, timedelta
 from psycopg2.extras import RealDictCursor
 from werkzeug.security import generate_password_hash, check_password_hash
 
-if any(arg in sys.argv for arg in ["--ping", "ping=true"]) or "ping" in st.query_params:
-    st.text("OK")
-    st.stop()
-
-query_params = st.query_params
-if "ping" in query_params:
-    st.write("OK")
-    st.stop()
+try:
+    from streamlit.web.server.server import Server
+    
+    current_server = Server.get_current()
+    if current_server and not getattr(current_server, "_ping_route_added", False):
+        class HealthPingHandler(tornado.web.RequestHandler):
+            def get(self):
+                self.set_header("Content-Type", "text/plain")
+                self.write("OK")
+        
+        
+        current_server._tornado_app.add_handlers(
+            r".*",
+            [(r"/ping", HealthPingHandler)]
+        )
+        current_server._ping_route_added = True
+except Exception:
+    pass
 
 st.set_page_config(
     page_title="Workout Tracker AI",
@@ -21,6 +31,11 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+query_params = st.query_params
+if "ping" in query_params:
+    st.text("OK")
+    st.stop()
 
 APP_URL = "https://workout-tracker-cli.onrender.com".rstrip("/")
 resend.api_key = os.environ.get("RESEND_API_KEY")
@@ -43,6 +58,7 @@ def get_db_connection():
 
 def generate_otp() -> str:
     return f"{secrets.randbelow(1000000):06d}"
+
 
 def is_valid_email_format(email: str) -> bool:
     pattern = r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$"
@@ -105,6 +121,7 @@ with st.sidebar:
             
             entered_otp = st.text_input("6-Digit Code", max_chars=6, key="input_otp")
             
+            # OTP Verification for Registration
             if st.session_state["otp_step"] == "verify_reg":
                 if st.button("Verify Account", type="primary", use_container_width=True):
                     conn = get_db_connection()
